@@ -1,0 +1,247 @@
+#!/bin/sh
+#
+
+#############################################################
+# AnripDdns v6.0.0
+#
+# Dynamic DNS using DNSPod API
+#
+# Author: anrip<mail@anrip.com>, www.anrip.com/post/872
+# Collaborators: ProfFan, https://github.com/ProfFan
+#
+# Usage: please refer to `ddnspod.sh`
+#
+#############################################################
+
+
+# Get WAN-IP
+
+arWanIp() {
+
+    local hostIp
+
+    hostIp=$(ifconfig | awk '/Global/{print $3}' | awk -F/ '{print $1}')
+
+    echo $hostIp
+
+}
+
+# Dnspod Bridge
+# Arg: type data
+
+arDdnsApi() {
+
+    local agent="AnripDdns/6.0.0(mail@anrip.com)"
+
+    local apiurl="https://dnsapi.cn/${1:?'Info.Version'}"
+    local params="login_token=$arToken&format=json&$2"
+
+    if type wget >/dev/null 2>&1; then
+        wget --quiet --no-check-certificate --output-document=- --user-agent=$agent --post-data $params $apiurl
+    else
+        curl -s -A $agent -d $params $apiurl
+    fi
+
+}
+
+# Fetch Domain Ip
+# Arg: domain
+
+arDdnsInfo() {
+	local domainID recordID recordIP
+	if [ "$IPv6" = "1" ]; then
+		domain_type="AAAA"
+		post_type="Record.Modify"
+	else
+		domain_type="A"
+		post_type="Record.Ddns"
+	fi
+	# 获得域名ID
+	domainID=$(arApiPost "Domain.Info" "domain=$DOMAIN")
+	domainID=$(echo $domainID | grep -Eo '"id":"[0-9]+"' | cut -d':' -f2 | tr -d '"')
+	
+	# 获得记录ID
+	recordID=$(arApiPost "Record.List" "domain_id=$domainID&sub_domain=$HOST")
+	recordID=$(echo $recordID | grep -Eo '"records".+' | sed -e "s/"'"remark":'"/"' \n '"/g" | grep '"type":"'$domain_type'"' | grep -Eo '"id":"[0-9]+"' | cut -d':' -f2 | tr -d '"' |head -n1)
+	
+	# 获得最后更新IP
+	recordIP=$(arApiPost "Record.Info" "domain_id=$domainID&record_id=$recordID")
+	recordIP=$(echo $recordIP | grep -Eo '"value":"[^"]*"' | awk -F ':"' '{print $2}' | tr -d '"' |head -n1)
+
+	# Output IP
+	if [ "$IPv6" = "1" ]; then
+	echo $recordIP
+	return 0
+	else
+	case "$recordIP" in 
+	[1-9]*)
+		echo $recordIP
+		return 0
+		;;
+	*)
+		domainID=""
+		recordID=""
+		recordIP=""
+		echo "Get Record Info Failed!"
+		#logger -t "【DNSPod动态域名】" "获取记录信息失败！"
+		return 1
+		;;
+	esac
+	fi
+}
+
+arApiPost() {
+	agent="AnripDdns/5.07(mail@anrip.com)"
+	inter="https://dnsapi.cn/${1:?'Info.Version'}"
+	if [ "x$dnspod_Token" = "x" ] ; then # undefine token
+		param="login_email=$dnspod_username&login_password=$dnspod_password&format=json&$2"
+	else
+		param="login_token=$dnspod_Token&format=json&$2"
+	fi
+	
+	
+	curltest=`which curl`
+	if [ -z "$curltest" ] || [ ! -s "`which curl`" ] ; then
+		wget -T 5 -t 3 --quiet --output-document=- --post-data $param $inter
+	else
+		curl -L    -X POST $inter -d $param
+	fi
+	sleep 1
+}
+
+# Update Domain Ip
+# Arg: main-domain sub-domain
+
+arDdnsUpdate() {
+	#local domainID recordID recordRS recordCD recordIP
+I=3
+recordID=""
+	if [ "$IPv6" = "1" ]; then
+		domain_type="AAAA"
+		post_type="Record.Modify"
+	else
+		domain_type="A"
+		post_type="Record.Ddns"
+	fi
+while [ "$recordID" = "" ] ; do
+	I=$(($I - 1))
+	[ $I -lt 0 ] && break
+	# 获得域名ID
+	domainID=$(arApiPost "Domain.Info" "domain=$DOMAIN")
+	domainID=$(echo $domainID  | grep -Eo '"id":"[0-9]+"' | cut -d':' -f2 | tr -d '"')
+	sleep 1
+	# 获得记录ID
+	recordID=$(arApiPost "Record.List" "domain_id=$domainID&sub_domain=$HOST")
+	recordID=$(echo $recordID | grep -Eo '"records".+' | sed -e "s/"'"remark":'"/"' \n '"/g" | grep '"type":"'$domain_type'"' | grep -Eo '"id":"[0-9]+"' | cut -d':' -f2 | tr -d '"' |head -n1)
+done
+	#echo "更新记录信息 recordID: " $recordID
+	if [ "$recordID" = "" ] ; then
+		# 添加子域名记录IP
+		myIP=$hostIP
+		echo "【DNSPod动态域名】" "添加子域名 $HOST 记录IP: $myIP"
+		recordRS=$(arApiPost "Record.Create" "domain_id=$domainID&sub_domain=$HOST&record_type=$domain_type&value=$myIP&record_line=默认")
+	else
+		# 更新记录IP
+		myIP=$hostIP
+		recordRS=$(arApiPost "$post_type" "domain_id=$domainID&record_id=$recordID&sub_domain=$HOST&record_type=$domain_type&value=$myIP&record_line=默认")
+	fi
+	recordCD=$(echo $recordRS | grep -Eo '"code":"[0-9]+"' | cut -d':' -f2 | tr -d '"')
+	recordIP=$(echo $recordRS | grep -Eo '"value":"[^"]*"' | awk -F ':"' '{print $2}' | tr -d '"')
+	# 输出记录IP
+	if [ "$recordIP" = "" ] ; then
+		sleep 10
+		# 获得记录ID
+		recordID=$(arApiPost "Record.List" "domain_id=$domainID&sub_domain=$HOST")
+		recordID=$(echo $recordID | grep -Eo '"records".+' | sed -e "s/"'"remark":'"/"' \n '"/g" | grep '"type":"'$domain_type'"' | grep -Eo '"id":"[0-9]+"' | cut -d':' -f2 | tr -d '"' |head -n1)
+		
+		# 获得最后更新IP
+		recordIP=$(arApiPost "Record.Info" "domain_id=$domainID&record_id=$recordID")
+		recordIP=$(echo $recordIP | grep -Eo '"value":"[^"]*"' | awk -F ':"' '{print $2}' | tr -d '"' |head -n1)
+	fi
+	if [ "$recordIP" = "$myIP" ]; then
+		if [ "$recordCD" = "1" ] ; then
+			echo $recordIP
+			echo "【DNSPod动态域名】" "`echo $recordRS | grep -Eo '"message":"[^"]*"' | cut -d':' -f2 | tr -d '"'`"
+			return 0
+		fi
+		# 输出错误信息
+		echo $recordRS | grep -Eo '"message":"[^"]*"' | cut -d':' -f2 | tr -d '"'
+		echo "【DNSPod动态域名】" "`echo $recordRS | grep -Eo '"message":"[^"]*"' | cut -d':' -f2 | tr -d '"'`"
+		return 1
+	fi
+	# 输出错误信息
+	echo "Update Failed! Please check your network."
+	echo "【DNSPod动态域名】" "`echo $recordRS | grep -Eo '"message":"[^"]*"' | cut -d':' -f2 | tr -d '"'`"
+	return 1
+}
+
+# DDNS Check
+# Arg: Main Sub
+arDdnsCheck() {
+	#local postRS
+	#local lastIP
+	DOMAIN=$1
+	HOST=$2
+	arIpAddress=$(arWanIp)
+	hostIP=$arIpAddress
+	hostIP=`echo $hostIP | head -n1 | cut -d' ' -f1`
+	if [ -z $(echo "$hostIP" | grep : | grep -v "\.") ] && [ "$IPv6" = "1" ] ; then 
+		IPv6=0
+		echo "【DNSPod动态域名】" "错误！$hostIP 获取目前 IPv6 失败，请在脚本更换其他获取地址，保证取得IPv6地址(例如:ff03:0:0:0:0:0:0:c1)"
+		return 1
+	fi
+	if [ "$hostIP"x = "x"  ] ; then
+		curltest=`which curl`
+		if [ -z "$curltest" ] || [ ! -s "`which curl`" ] ; then
+			[ "$hostIP"x = "x"  ] && hostIP=`wget -T 5 -t 3 --user-agent "$user_agent" --quiet --output-document=- "http://members.3322.org/dyndns/getip" | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+			[ "$hostIP"x = "x"  ] && hostIP=`wget -T 5 -t 3 --user-agent "$user_agent" --quiet --output-document=- "ip.3322.net" | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+			[ "$hostIP"x = "x"  ] && hostIP=`wget -T 5 -t 3 --user-agent "$user_agent" --quiet --output-document=- "https://www.ipip.net/" | grep "IP地址" | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+			[ "$hostIP"x = "x"  ] && hostIP=`wget -T 5 -t 3 --user-agent "$user_agent" --quiet --output-document=- "http://pv.sohu.com/cityjson?ie=utf-8" | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+		else
+			[ "$hostIP"x = "x"  ] && hostIP=`curl -L --user-agent "$user_agent" -s "http://members.3322.org/dyndns/getip" | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+			[ "$hostIP"x = "x"  ] && hostIP=`curl -L --user-agent "$user_agent" -s ip.3322.net | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+			[ "$hostIP"x = "x"  ] && hostIP=`curl -L --user-agent "$user_agent" -s "https://www.ipip.net" | grep "IP地址" | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+			[ "$hostIP"x = "x"  ] && hostIP=`curl -L --user-agent "$user_agent" -s http://pv.sohu.com/cityjson?ie=utf-8 | grep -E -o '([0-9]+\.){3}[0-9]+' | head -n1 | cut -d' ' -f1`
+		fi
+		if [ "$hostIP"x = "x"  ] ; then
+			echo "【DNSPod动态域名】" "错误！获取目前 IP 失败，请在脚本更换其他获取地址"
+			return 1
+		fi
+	fi
+	echo "Updating Domain: $HOST.$DOMAIN"
+	echo "hostIP: $hostIP"
+	#lastIP=$(arNslookup "$HOST.$DOMAIN")
+	lastIP=$(arDdnsInfo "$DOMAIN" "$HOST")
+	if [ $? -eq 1 ]; then
+		[ "$IPv6" != "1" ] && lastIP=$(arNslookup "$HOST.$DOMAIN")
+		[ "$IPv6" = "1" ] && lastIP=$(arNslookup6 "$HOST.$DOMAIN")
+	fi
+	echo "lastIP: $lastIP"
+	if [ "$lastIP" != "$hostIP" ] ; then
+		echo "【DNSPod动态域名】" "开始更新 $HOST.$DOMAIN 域名 IP 指向"
+		echo "【DNSPod动态域名】" "目前 IP: $hostIP"
+		echo "【DNSPod动态域名】" "上次 IP: $lastIP"
+		domainID=""
+		recordID=""
+		recordIP=""
+		sleep 1
+		postRS=$(arDdnsUpdate "$DOMAIN" "$HOST")
+		if [ $? -eq 0 ]; then
+			echo "postRS: $postRS"
+			echo "【DNSPod动态域名】" "更新动态DNS记录成功！提交的IP: $postRS"
+			return 0
+		else
+			echo $postRS
+			echo "【DNSPod动态域名】" "更新动态DNS记录失败！请检查您的网络。提交的IP: $postRS"
+			if [ "$IPv6" = "1" ] ; then 
+				IPv6=0
+				echo "【DNSPod动态域名】" "错误！$hostIP 获取目前 IPv6 失败，请在脚本更换其他获取地址，保证取得IPv6地址(例如:ff03:0:0:0:0:0:0:c1)"
+				return 1
+			fi
+			return 1
+		fi
+	fi
+	echo "Last IP is the same as current IP!"
+	return 1
+
+}
